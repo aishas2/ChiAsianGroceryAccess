@@ -1,0 +1,228 @@
+---
+title: Spatial Access to Culturally-Appropriate Grocery Stores for Chicago Asian Immigrant
+  Populations in 2013
+author: "Aisha Syed"
+date: '2022-12-07'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = F}
+#set up environment 
+setwd("~/GEOG224/FinalProj")
+library(sf)
+library(tmap)
+library(tidyverse)
+library(tidycensus)
+library(spatialreg)
+library(spdep)
+Sys.getenv("CENSUS_API_KEY") #API key already installed
+```
+
+# Load and wrangle data
+
+Data sources:
+Chicago Tracts: City of Chicago & United States Census Bureau (2010)
+ACS Data: United States Census Bureau (2013)
+Grocery stores: City of Chicago (2013)
+
+First we will load in the Chicago census tracts data
+```{r}
+#Load in Chicago census tracts
+chitracts = st_read("~/GEOG224/FinalProj/data/geo_export_c85d4d5a-2c25-40c7-a01e-ee4bdd4075f9.shp")
+str(chitracts)
+
+st_crs(chitracts) #WGS84, unit = degrees
+
+chitracts = chitracts |>
+  st_transform(3435) |> #East state plane, unit = Feet
+  select(c(name10, namelsad10, tractce10, geometry))
+
+plot(chitracts)
+```
+
+Next, we will load in the ACS demographic data to find foreign born percentages Asian percentages by census tract. Census data wrangling was guided by https://geodacenter.github.io/opioid-environment-toolkit/getACSData-tutorial.html and  https://walker-data.com/census-r/an-introduction-to-tidycensus.html.
+```{r message=F}
+#find variable of interest
+#filtering method inspired by OPIOID URL
+pVarNames = load_variables(2013, "acs5/profile", cache = TRUE) |> 
+  filter(str_detect(label, "Foreign")) |>  # search for variables
+  filter(str_detect(label, "Asian")) |>  # search for variables
+  mutate(label = sub("^Estimate!!", "", label)) |> # remove unnecessary text
+  select(variable = name, label) # drop unnecessary columns and rename
+pVarNames #	DP02_0105P
+
+#load variable from tidycensus
+IL_acs = get_acs(geography = "tract",variables = c(AsianImmigrant = "DP02_0105P"), 
+                 year = 2013, state = "IL", survey = "acs5", geometry = T) |>
+  select(GEOID, NAME, variable, estimate) |>
+  spread(variable, estimate) |>
+  st_transform(st_crs(chitracts))
+head(IL_acs)
+
+chi = IL_acs[chitracts,] #subset ACS data to Chicago
+
+tm_shape(chi) + tm_polygons(col = "AsianImmigrant", pal = "PuRd", style = "pretty", border.alpha = 0.5) +
+  tm_layout(main.title = "% Asian Immigrants in Chicago (2013)", bg.color = "gray85", main.title.size = 1) + 
+  tm_scale_bar(position = c("left", "bottom")) + tm_compass(position = c("right", "top"))
+
+```
+
+
+Finally, we will load in grocery store location data.
+```{r warning=F}
+grocery = st_read("~/GEOG224/FinalProj/data/Grocery.geojson") 
+str(grocery)
+
+grocery = st_transform(grocery, st_crs(chitracts)) #transform CRS to same one as chitracts
+
+#find open grocery stores that sell ingredients used in Asian cuisines
+asian_grocery = grocery |>
+  st_transform(st_crs(chitracts)) |>
+  filter(str_detect(store_name, "International") | 
+           str_detect(store_name, "Asian") |
+           str_detect(store_name, "Patel") |
+           str_detect(store_name, "Hong Kong")|
+           str_detect(store_name, "Tai") |
+           str_detect(store_name, "Viet") |
+           str_detect(store_name, "Nam")|
+           str_detect(store_name, "Mart")|
+           str_detect(store_name, "Park") |
+           str_detect(store_name, "Joong") |
+           str_detect(store_name, "Gong") |
+           str_detect(store_name, "Market") |
+           str_detect(store_name, "Zabiha") |
+           str_detect(store_name, "Oriental")) |>
+  filter(new_status == "OPEN")
+
+subset(asian_grocery, is.na(asian_grocery$geometry)) #check for missing geometry
+
+tm_shape(chi) + tm_fill(col = "white") +
+  tm_shape(grocery) + tm_dots(col = "pink", size = 0.25) +
+  tm_shape(asian_grocery) + tm_dots(col = "red", size = 0.25) +
+  tm_layout(main.title = "Chicago Grocery Stores (2013)", bg.color = "gray85", main.title.size = 1) + 
+  tm_scale_bar(position = c("left", "bottom")) + tm_compass(position = c("right", "top"))
+  
+```
+
+## Construct "accessible" areas surrounding Asian grocery stores
+
+The USDA defines spatial food access to be 1 mile away from a grocery store in an urban area. We acknowledge access also considers variety of stores to choose from, therefore the buffers will not be unioned to count the number of accessible grocery stores per tract and number of accessible Asian grocery stores per tract. 
+
+```{r}
+mile = 5280 #feet
+
+asian_grocery_buffers = st_buffer(asian_grocery, mile) #create 1 mile access areas
+
+asiangrocery_by_tract = st_join(chi, asian_grocery_buffers, join = st_intersects) #spatial join for crimes within each tract
+glimpse(asiangrocery_by_tract) #tract id is attached to homicide point data
+
+asiangrocery_count = table(asiangrocery_by_tract$GEOID) |>  #count crimes per tract
+  as.data.frame()
+colnames(asiangrocery_count) #column names are "var1" and "freq"
+names(asiangrocery_count) = c("GEOID","AsianGroceryCt") #rename columns
+
+Chi = merge(chi, asiangrocery_count, by="GEOID") #merge count column to tracts df by tract id
+
+Chi = Chi[!is.na(Chi$AsianImmigrant),] #remove entries where AsianImmigrant is NA
+```
+
+Visualize the result
+```{r}
+agb = tm_shape(Chi) + tm_polygons(col = "AsianGroceryCt", pal = "PuRd", style = "jenks", border.alpha = 0.5) + 
+  tm_layout(main.title = "# of Accessible and Acceptable Grocery Stores by Census Tract", main.title.size = 0.55, bg.color = "gray85") + 
+  tm_scale_bar(position = c("left", "bottom")) + tm_compass(position = c("right", "top"))
+
+ai = tm_shape(chi) + tm_polygons(col = "AsianImmigrant", pal = "PuRd", style = "jenks", border.alpha = 0.5) +
+  tm_layout(main.title = "% Asian Immigrants by Census Tract", bg.color = "gray85", main.title.size = .75) + 
+  tm_scale_bar(position = c("left", "bottom")) + tm_compass(position = c("right", "top"))
+
+tmap_arrange(agb, ai)
+
+tmap_save(tm_shape(Chi) + tm_polygons(col = "AsianGroceryCt", pal = "PuRd", style = "jenks", border.alpha = 0.5) + 
+  tm_layout(main.title = "# of Accessible and Acceptable Grocery Stores by Census Tract", main.title.size = 1, bg.color = "gray85") + 
+  tm_scale_bar(position = c("left", "bottom")) + tm_compass(position = c("right", "top")), "my_map.png") #save agb
+```
+
+## Analysis
+
+The following method was guided by https://michaelminn.net/tutorials/r-crime/index.html. 
+
+26% of Chicago grocery stores offer Asian ingredients. 
+```{r}
+nrow(asian_grocery) / nrow(grocery)
+```
+
+# Linear regression
+
+The slope is 0.017 with a p-value < 0.05, therefore there is a significant weak positive relationship between grocery store access and Asian immigrant concentrations in by census tract in Chicago in 2013. The R-squared is 0.064, therefore there is a weak correlation between the two variables. The linear model diagnostic plots show that the linear model's assumptions were not met, and the model is not a good fit for the data.
+
+```{r}
+AsianGrocery = lm(AsianGroceryCt ~ AsianImmigrant, data=Chi)
+
+summary(AsianGrocery)
+
+plot(AsianGroceryCt ~ AsianImmigrant, data=Chi, pch=16, col="gray") +
+  abline(lm(AsianGroceryCt ~ AsianImmigrant, data=Chi), lwd=3, col="red")
+
+par(mfrow = c(2,2))
+plot(AsianGrocery)
+```
+
+# Spatial Lag Regression
+
+Because the p-value of this model is > 0.05, the relationship is inconclusive. The significant and positive rho (rho = 0.98068) indicates that spatial autocorrelation, or clustering, is meaningful. 
+
+```{r warning = F}
+weights = poly2nb(as_Spatial(Chi), queen=T) |>
+  nb2listw(style="W", zero.policy=T)
+
+AsianGrocery.lag = lagsarlm(AsianGroceryCt ~ AsianImmigrant, data=Chi,
+	listw=weights, tol.solve=1.0e-30, zero.policy=T)
+summary(AsianGrocery.lag)
+```
+
+# Spatial Error Regression
+
+Because the p-value of this model is > 0.05, the relationship is inconclusive. A significant and positive lambda (lambda = 0.98173) indicates that spatial autocorrelation, or clustering, is important. 
+
+```{r warning = F}
+AsianGrocery.error = errorsarlm(AsianGroceryCt ~ AsianImmigrant, data=Chi,
+	listw=weights, tol.solve=1.0e-30, zero.policy=T)
+
+summary(AsianGrocery.error)
+```
+
+## Evaluating Regression Models
+
+Next, I will evaluate the AIC for the regressions, or the Akaike information criterion where a lower value indicates less estimated model prediction error and a better model fit. The lower the AIC, the better the fit. The spatial regression models are more accurate than the non-spatial regression model, though neither model is meaningfully better than the other because the difference in AIC is minuscule. The better fit of spatial models indicate an importance of spatial autocorrelation with the variables.
+
+```{r}
+table = matrix(c(3215.5, 1932.5, 1931.6), ncol=3, byrow=TRUE)
+rownames(table) = c("AsianGrocery ~ % Asian Born")
+colnames(table) = c("Non-spatial Model","Spatial Lag","Spatial Error")
+AIC_results = as.data.frame(table)
+
+AIC_results
+```
+
+# Investigation Areal autocorrelation
+
+Because the regression models suggest that spatial autocorrelation is meaningful when examining the relationship between access to Asian grocery stores and percent Asian populations by census tract, it is valuable to investigate areal autocorrelation of the distribution of Asian grocery store access areas. We will use Moran's I to evaluate the presence and significance of clustering.
+
+Moran's I statistic is 0.86 with a significant p-value < 0.05. This means that there is heavy clustering when considering access to Asian grocery stores by census tract in Chicago, IL in 2013.
+
+```{r}
+moran.grocery = moran.test(Chi$AsianGroceryCt, weights)
+print(moran.grocery)
+```
+The spatial clustering of Asian immigrant neighborhoods is significantly semi-clustered.
+```{r}
+moran.pop = moran.test(Chi$AsianImmigrant, weights)
+print(moran.pop)
+```
